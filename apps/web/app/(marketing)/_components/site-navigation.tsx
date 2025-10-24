@@ -30,6 +30,10 @@ const links = {
     label: 'marketing:faq',
     path: '/faq',
   },
+  Chat: {
+    label: 'marketing:chat',
+    path: '/chat',
+  },
   Contact: {
     label: 'marketing:contact',
     path: '/contact',
