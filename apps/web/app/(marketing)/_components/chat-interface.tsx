@@ -18,9 +18,27 @@ import {
   AlertDialogTrigger,
 } from '@kit/ui/alert-dialog';
 
+interface ContentPart {
+  type: 'text' | 'image_url';
+  text?: string;
+  image_url?: {
+    url: string;
+    detail?: string;
+  };
+}
+
+interface PDFDocument {
+  name: string;
+  content: string;
+  base64: string;
+  numPages: number;
+}
+
 interface Message {
   role: 'user' | 'assistant';
-  content: string;
+  content: string | ContentPart[];
+  isMultimodal?: boolean;
+  pdfs?: PDFDocument[];
 }
 
 export function ChatInterface() {
@@ -68,14 +86,35 @@ export function ChatInterface() {
 
   // Send message to API
   const sendMessage = useCallback(
-    async (content: string) => {
+    async (content: string, images?: string[], pdfs?: PDFDocument[]) => {
       if (!sessionId) {
         console.error('No session ID available');
         return;
       }
 
+      // Create user message with images if present
+      let userMessageContent: string | ContentPart[];
+      
+      if (images && images.length > 0) {
+        userMessageContent = [
+          { type: 'text' as const, text: content },
+          ...images.map((url) => ({
+            type: 'image_url' as const,
+            image_url: { url },
+          })),
+        ];
+      } else {
+        userMessageContent = content;
+      }
+
       // Add user message to UI immediately
-      const userMessage: Message = { role: 'user', content };
+      const userMessage: Message = {
+        role: 'user',
+        content: userMessageContent,
+        isMultimodal: images && images.length > 0,
+        pdfs: pdfs,
+      };
+      
       setMessages((prev) => [...prev, userMessage]);
       setIsLoading(true);
 
@@ -88,6 +127,8 @@ export function ChatInterface() {
           body: JSON.stringify({
             message: content,
             sessionId: sessionId,
+            images: images,
+            pdfs: pdfs,
           }),
         });
 
@@ -97,6 +138,35 @@ export function ChatInterface() {
         }
 
         const data = await response.json();
+
+        // Update user message with actual Cloudinary URLs if files were uploaded
+        if (data.imageUrls && data.imageUrls.length > 0) {
+          setMessages((prev) => {
+            const updatedMessages = [...prev];
+            const lastIndex = updatedMessages.length - 1;
+            
+            if (lastIndex >= 0 && updatedMessages[lastIndex].role === 'user') {
+              const lastMessage = updatedMessages[lastIndex];
+              
+              // Update image URLs to use Cloudinary secure URLs
+              if (Array.isArray(lastMessage.content)) {
+                lastMessage.content = lastMessage.content.map((part, index) => {
+                  if (part.type === 'image_url' && data.imageUrls[index]) {
+                    return {
+                      ...part,
+                      image_url: {
+                        url: data.imageUrls[index],
+                      },
+                    };
+                  }
+                  return part;
+                });
+              }
+            }
+            
+            return updatedMessages;
+          });
+        }
 
         // Add assistant response
         const assistantMessage: Message = {

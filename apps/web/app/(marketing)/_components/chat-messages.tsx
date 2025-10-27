@@ -6,9 +6,27 @@ import { ScrollArea } from '@kit/ui/scroll-area';
 import { Loader2 } from 'lucide-react';
 import { cn } from '@kit/ui/utils';
 
+interface ContentPart {
+  type: 'text' | 'image_url';
+  text?: string;
+  image_url?: {
+    url: string;
+    detail?: string;
+  };
+}
+
+interface PDFDocument {
+  name: string;
+  content: string;
+  base64: string;
+  numPages: number;
+}
+
 interface Message {
   role: 'user' | 'assistant';
-  content: string;
+  content: string | ContentPart[];
+  isMultimodal?: boolean;
+  pdfs?: PDFDocument[];
 }
 
 interface ChatMessagesProps {
@@ -48,6 +66,8 @@ export function ChatMessages({ messages, isLoading = false }: ChatMessagesProps)
             key={index}
             role={message.role}
             content={message.content}
+            isMultimodal={message.isMultimodal}
+            pdfs={message.pdfs}
           />
         ))}
 
