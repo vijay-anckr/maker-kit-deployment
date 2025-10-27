@@ -61,27 +61,6 @@ export async function uploadToCloudinary(
 }
 
 /**
- * Delete a file from Cloudinary
- * @param publicId - Cloudinary public ID (folder/filename)
- * @param resourceType - 'image' or 'raw'
- */
-export async function deleteFromCloudinary(
-  publicId: string,
-  resourceType: 'image' | 'raw' = 'image',
-): Promise<void> {
-  try {
-    await cloudinary.uploader.destroy(publicId, {
-      resource_type: resourceType,
-    });
-  } catch (error) {
-    console.error('Error deleting from Cloudinary:', error);
-    throw new Error(
-      `Failed to delete file: ${error instanceof Error ? error.message : 'Unknown error'}`,
-    );
-  }
-}
-
-/**
  * Generate a unique filename for Cloudinary
  * @param sessionId - Chat session ID
  * @param originalFilename - Original filename
@@ -93,47 +72,9 @@ export function generateCloudinaryFilename(
 ): string {
   const timestamp = Date.now();
   const sanitizedFilename = originalFilename
-    .replace(/\.[^/.]+$/, '') // Remove extension
-    .replace(/[^a-zA-Z0-9.-]/g, '_'); // Sanitize
+    .replace(/\.[^/.]+$/, '')
+    .replace(/[^a-zA-Z0-9.-]/g, '_');
   return `${sessionId}_${timestamp}_${sanitizedFilename}`;
-}
-
-/**
- * Download file from URL (for PDF processing)
- * @param url - File URL
- * @returns File buffer
- */
-export async function downloadFromUrl(url: string): Promise<Buffer> {
-  try {
-    const response = await fetch(url);
-
-    if (!response.ok) {
-      throw new Error(`Failed to download: ${response.statusText}`);
-    }
-
-    const arrayBuffer = await response.arrayBuffer();
-    return Buffer.from(arrayBuffer);
-  } catch (error) {
-    console.error('Error downloading from URL:', error);
-    throw new Error(
-      `Failed to download file: ${error instanceof Error ? error.message : 'Unknown error'}`,
-    );
-  }
-}
-
-/**
- * Get Cloudinary public ID from URL
- * @param url - Cloudinary secure URL
- * @returns Public ID (folder/filename)
- */
-export function getPublicIdFromUrl(url: string): string {
-  // Extract public ID from Cloudinary URL
-  // Format: https://res.cloudinary.com/{cloud_name}/{resource_type}/upload/v{version}/{folder}/{filename}.{ext}
-  const matches = url.match(/\/upload\/(?:v\d+\/)?(.+)\.[^.]+$/);
-  if (!matches) {
-    throw new Error('Invalid Cloudinary URL');
-  }
-  return matches[1];
 }
 
 /**
@@ -151,17 +92,3 @@ export function validateCloudinaryConfig(): void {
     );
   }
 }
-
-/**
- * Convert base64 to Buffer
- * @param base64String - Base64 string (with or without data URL prefix)
- * @returns Buffer
- */
-export function base64ToBuffer(base64String: string): Buffer {
-  // Remove data URL prefix if present
-  const base64Data = base64String.replace(/^data:.*?;base64,/, '');
-  return Buffer.from(base64Data, 'base64');
-}
-
-
-

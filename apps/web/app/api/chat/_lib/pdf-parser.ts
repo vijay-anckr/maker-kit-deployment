@@ -25,17 +25,6 @@ export async function extractTextFromPDF(buffer: Buffer): Promise<{
 }
 
 /**
- * Convert base64 PDF to Buffer
- * @param base64String - Base64 encoded PDF (with or without data URL prefix)
- * @returns Buffer containing PDF data
- */
-export function base64ToBuffer(base64String: string): Buffer {
-  // Remove data URL prefix if present
-  const base64Data = base64String.replace(/^data:application\/pdf;base64,/, '');
-  return Buffer.from(base64Data, 'base64');
-}
-
-/**
  * Chunk large PDF text into smaller segments
  * Useful for very large PDFs to avoid token limits
  * @param text - Full PDF text

@@ -1,21 +1,11 @@
 import { ChatOpenAI } from '@langchain/openai';
-import {
-  ChatPromptTemplate,
-  MessagesPlaceholder,
-} from '@langchain/core/prompts';
-import { RunnableWithMessageHistory } from '@langchain/core/runnables';
 import { UpstashRedisChatMessageHistory } from '@langchain/community/stores/message/upstash_redis';
 import { HumanMessage, AIMessage } from '@langchain/core/messages';
 import { NextRequest, NextResponse } from 'next/server';
-import {
-  extractTextFromPDF,
-  base64ToBuffer,
-  chunkText,
-} from './_lib/pdf-parser';
+import { extractTextFromPDF, chunkText } from './_lib/pdf-parser';
 import {
   uploadToCloudinary,
   generateCloudinaryFilename,
-  downloadFromUrl,
   validateCloudinaryConfig,
 } from './_lib/cloudinary-storage';
 
@@ -94,11 +84,8 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    // Determine if we have images or PDFs (for logging/analytics)
     const hasImages = images && images.length > 0;
     const hasPDFs = pdfs && pdfs.length > 0;
-
-    // Validate environment variables
     if (!process.env.OPENAI_API_KEY) {
       console.error('OPENAI_API_KEY is not configured');
       return NextResponse.json(
@@ -131,7 +118,6 @@ export async function POST(request: NextRequest) {
       }
     }
 
-    // Initialize OpenAI model - Always use GPT-4o for all conversations
     const model = new ChatOpenAI({
       modelName: 'gpt-4o',
       temperature: 0.7,
@@ -139,7 +125,6 @@ export async function POST(request: NextRequest) {
       maxTokens: 4096,
     });
 
-    // Get message history
     const messageHistory = new UpstashRedisChatMessageHistory({
       sessionId,
       config: {
@@ -148,22 +133,17 @@ export async function POST(request: NextRequest) {
       },
     });
 
-    // Get existing messages
     const previousMessages = await messageHistory.getMessages();
-
-    // Upload images to Cloudinary and get URLs
     let imageUrls: string[] = [];
     if (hasImages) {
       try {
         imageUrls = await Promise.all(
           images.map(async (base64Image: string, index: number) => {
-            // Generate unique filename
             const filename = generateCloudinaryFilename(
               sessionId,
               `image-${index}`,
             );
 
-            // Upload to Cloudinary
             const secureUrl = await uploadToCloudinary(
               base64Image,
               'chat-images',
@@ -180,22 +160,38 @@ export async function POST(request: NextRequest) {
       }
     }
 
-    // Upload PDFs to Cloudinary, download, and extract text
+    // Extract text from PDFs first, then upload to Cloudinary
     let pdfUrls: string[] = [];
     let pdfContext = '';
     if (hasPDFs) {
       const pdfTexts: string[] = [];
 
       try {
-        // Upload PDFs first
-        pdfUrls = await Promise.all(
+        // Process each PDF: extract text, then upload
+        const pdfResults = await Promise.all(
           pdfs.map(async (pdf: any, index: number) => {
+            let extractedText = '';
+            let numPages = 0;
+            let errorOccurred = false;
+
+            // Extract text from base64 PDF data
+            try {
+              const base64Data = pdf.base64.replace(/^data:application\/pdf;base64,/, '');
+              const buffer = Buffer.from(base64Data, 'base64');
+              const result = await extractTextFromPDF(buffer);
+              extractedText = result.text;
+              numPages = result.numPages;
+            } catch (error) {
+              console.error(`Error extracting text from PDF ${pdf.name}:`, error);
+              errorOccurred = true;
+            }
+
+            // Upload to Cloudinary
             const filename = generateCloudinaryFilename(
               sessionId,
               pdf.name ?? `document-${index}`,
             );
 
-            // Upload to Cloudinary (use 'raw' resource type for PDFs)
             const secureUrl = await uploadToCloudinary(
               pdf.base64,
               'chat-pdfs',
@@ -203,85 +199,67 @@ export async function POST(request: NextRequest) {
               'raw',
             );
 
-            return secureUrl;
+            return {
+              url: secureUrl,
+              name: pdf.name,
+              text: extractedText,
+              numPages,
+              errorOccurred,
+            };
           }),
         );
 
-        // Download and extract text from uploaded PDFs
-        for (let i = 0; i < pdfUrls.length; i++) {
-          const pdfUrl = pdfUrls[i];
-          const pdf = pdfs[i];
-
-          if (!pdfUrl) {
-            console.error(`No URL for PDF at index ${i}`);
-            continue;
-          }
-
-          try {
-            // Download PDF from Cloudinary
-            const buffer = await downloadFromUrl(pdfUrl);
-            const { text, numPages } = await extractTextFromPDF(buffer);
-
-            // Chunk large PDFs to avoid token limits
-            const chunks = chunkText(text, 12000);
-            const pdfSummary = chunks[0]; // Use first chunk or summarize
+        // Build context from extracted text and URLs
+        pdfResults.forEach((result) => {
+          if (result.errorOccurred) {
+            pdfTexts.push(
+              `\n\n--- PDF Document: "${result.name}" ---\nURL: ${result.url}\n[Error: Could not extract text from this PDF]\n--- End of PDF ---\n`,
+            );
+          } else {
+            const chunks = chunkText(result.text, 12000);
+            const pdfSummary = chunks[0];
 
             pdfTexts.push(
-              `\n\n--- PDF Document: "${pdf.name}" (${numPages} pages) ---\nURL: ${pdfUrl}\n${pdfSummary}\n--- End of PDF ---\n`,
-            );
-          } catch (error) {
-            console.error(`Error processing PDF ${pdf.name}:`, error);
-            pdfTexts.push(
-              `\n\n--- PDF Document: "${pdf.name}" ---\nURL: ${pdfUrl}\n[Error: Could not extract text from this PDF]\n--- End of PDF ---\n`,
+              `\n\n--- PDF Document: "${result.name}" (${result.numPages} pages) ---\nURL: ${result.url}\n${pdfSummary}\n--- End of PDF ---\n`,
             );
           }
-        }
+
+          pdfUrls.push(result.url);
+        });
 
         pdfContext = pdfTexts.join('\n');
       } catch (error) {
-        console.error('Error uploading PDFs to Cloudinary:', error);
-        throw new Error('Failed to upload PDFs');
+        console.error('Error processing PDFs:', error);
+        throw new Error('Failed to process PDFs');
       }
     }
 
-    // Create multimodal content if images or PDFs are provided
     let userMessageContent: string | (TextContent | ImageContent)[];
-    let fullMessageText = message;
-
-    // Add PDF context to message if present
-    if (pdfContext) {
-      fullMessageText += pdfContext;
-    }
+    const messageText = pdfContext ? message + pdfContext : message;
 
     if (hasImages) {
-      // Build multimodal content array with Cloudinary image URLs
       userMessageContent = [
         {
           type: 'text' as const,
-          text: fullMessageText,
+          text: messageText,
         },
         ...imageUrls.map((imageUrl: string) => ({
           type: 'image_url' as const,
           image_url: {
-            url: imageUrl, // Cloudinary secure URL
+            url: imageUrl,
             detail: 'auto' as const,
           },
         })),
       ];
     } else {
-      userMessageContent = fullMessageText;
+      userMessageContent = messageText;
     }
 
-    // Create user message
     const userMessage = new HumanMessage({
       content: userMessageContent,
     });
 
-    // Add user message to history
     await messageHistory.addMessage(userMessage);
-
-    // Build messages array for the model
-    // Always use advanced system prompt since we're using GPT-4o
     const systemPrompt =
       'You are a helpful AI assistant with vision and document analysis capabilities. You can analyze images, extract information from PDFs, and provide detailed insights. When answering questions about PDF documents, be specific and cite the relevant sections. Provide clear, concise, and accurate responses. Be friendly and professional.';
 
@@ -294,19 +272,11 @@ export async function POST(request: NextRequest) {
         const role = msg._getType() === 'human' ? 'user' : 'assistant';
         let content = msg.content;
 
-        // Ensure content is in the correct format
-        // If it's already an array (multimodal), keep it as is
-        // If it's a string, keep it as is
-        // If it's an object with parts, convert to proper format
         if (typeof content === 'object' && !Array.isArray(content)) {
-          // Handle case where content might be a serialized object
           content = String(content);
         }
 
-        return {
-          role,
-          content,
-        };
+        return { role, content };
       }),
       {
         role: 'user',
@@ -314,7 +284,6 @@ export async function POST(request: NextRequest) {
       },
     ];
 
-    // Invoke the model directly
     let response;
     try {
       response = await model.invoke(messages);
@@ -326,25 +295,21 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    // Extract the assistant's response
     const assistantMessage =
       typeof response.content === 'string'
         ? response.content
         : JSON.stringify(response.content);
 
-    // Add assistant message to history as text
     const aiMessage = new AIMessage(assistantMessage);
     await messageHistory.addMessage(aiMessage);
-
-    // Return the response with file URLs
     return NextResponse.json({
       message: assistantMessage,
       sessionId: sessionId,
       hasVision: hasImages,
       hasPDFs: hasPDFs,
       pdfCount: hasPDFs ? pdfs.length : 0,
-      imageUrls: imageUrls, // Cloudinary secure URLs for images
-      pdfUrls: pdfUrls, // Cloudinary secure URLs for PDFs
+      imageUrls,
+      pdfUrls
     });
   } catch (error) {
     console.error('Error in chat API:', error);
@@ -375,7 +340,6 @@ export async function GET(request: NextRequest) {
       );
     }
 
-    // Use UpstashRedisChatMessageHistory to retrieve messages
     const messageHistory = new UpstashRedisChatMessageHistory({
       sessionId,
       config: {
@@ -385,13 +349,9 @@ export async function GET(request: NextRequest) {
     });
 
     const messages = await messageHistory.getMessages();
-
-    // Convert BaseMessage objects to simple format for client
-    // Handle both text and multimodal messages
     const conversationHistory = messages.map((msg: any) => {
       const role = msg._getType() === 'human' ? 'user' : 'assistant';
-      
-      // Check if content is multimodal (array of content parts)
+
       if (Array.isArray(msg.content)) {
         return {
           role,
@@ -399,8 +359,7 @@ export async function GET(request: NextRequest) {
           isMultimodal: true,
         };
       }
-      
-      // Regular text message
+
       return {
         role,
         content: msg.content as string,
@@ -441,7 +400,6 @@ export async function DELETE(request: NextRequest) {
       );
     }
 
-    // Use UpstashRedisChatMessageHistory to clear messages
     const messageHistory = new UpstashRedisChatMessageHistory({
       sessionId,
       config: {
