@@ -1,6 +1,6 @@
-import { ChatInterface } from '../_components/chat-interface';
 import { withI18n } from '~/lib/i18n/with-i18n';
 import { createI18nServerInstance } from '~/lib/i18n/i18n.server';
+import { ChatInterface } from '~/components/chat-interface';
 
 export const generateMetadata = async () => {
   const i18n = await createI18nServerInstance();

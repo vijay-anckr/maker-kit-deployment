@@ -6,7 +6,7 @@ import { withI18n } from '~/lib/i18n/with-i18n';
 
 // local imports
 import { HomeLayoutPageHeader } from './_components/home-page-header';
-import { ChatInterface } from '~/app/(marketing)/_components/chat-interface';
+import { ChatInterface } from '~/components/chat-interface';
 
 export const generateMetadata = async () => {
   const i18n = await createI18nServerInstance();

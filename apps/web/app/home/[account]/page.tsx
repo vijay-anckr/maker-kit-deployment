@@ -9,7 +9,7 @@ import { withI18n } from '~/lib/i18n/with-i18n';
 
 import { DashboardDemo } from './_components/dashboard-demo';
 import { TeamAccountLayoutPageHeader } from './_components/team-account-layout-page-header';
-import { ChatInterface } from '~/app/(marketing)/_components/chat-interface';
+import { ChatInterface } from '~/components/chat-interface';
 
 interface TeamAccountHomePageProps {
   params: Promise<{ account: string }>;
