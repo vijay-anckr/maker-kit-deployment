@@ -1,4 +1,5 @@
 import { ChatOpenAI } from '@langchain/openai';
+import { GoogleGenAI } from '@google/genai';
 import { UpstashRedisChatMessageHistory } from '@langchain/community/stores/message/upstash_redis';
 import { HumanMessage, AIMessage } from '@langchain/core/messages';
 import { NextRequest, NextResponse } from 'next/server';
@@ -11,6 +12,7 @@ import {
 
 // Environment variables required:
 // OPENAI_API_KEY - Your OpenAI API key
+// GOOGLE_API_KEY - Your Google AI API key (for Gemini PDF processing)
 // UPSTASH_REDIS_REST_URL - Your Upstash Redis REST URL
 // UPSTASH_REDIS_REST_TOKEN - Your Upstash Redis REST token
 // CLOUDINARY_CLOUD_NAME - Your Cloudinary cloud name
@@ -86,10 +88,20 @@ export async function POST(request: NextRequest) {
 
     const hasImages = images && images.length > 0;
     const hasPDFs = pdfs && pdfs.length > 0;
+    
     if (!process.env.OPENAI_API_KEY) {
       console.error('OPENAI_API_KEY is not configured');
       return NextResponse.json(
         { error: 'Chat service is not properly configured' },
+        { status: 500 },
+      );
+    }
+
+    // Validate Google API key for PDF processing
+    if (hasPDFs && !process.env.GOOGLE_API_KEY) {
+      console.error('GOOGLE_API_KEY is not configured but PDFs were provided');
+      return NextResponse.json(
+        { error: 'PDF processing service is not properly configured' },
         { status: 500 },
       );
     }
@@ -160,74 +172,47 @@ export async function POST(request: NextRequest) {
       }
     }
 
-    // Extract text from PDFs first, then upload to Cloudinary
+    // Process PDFs with Google Gemini and upload to Cloudinary
     let pdfUrls: string[] = [];
-    let pdfContext = '';
+    let pdfData: { base64: string; name: string }[] = [];
+    
     if (hasPDFs) {
-      const pdfTexts: string[] = [];
-
       try {
-        // Process each PDF: extract text, then upload
+        // Process each PDF: upload to Cloudinary and prepare for inline processing
         const pdfResults = await Promise.all(
           pdfs.map(async (pdf: any, index: number) => {
-            let extractedText = '';
-            let numPages = 0;
-            let errorOccurred = false;
-
-            // Extract text from base64 PDF data
-            try {
-              const base64Data = pdf.base64.replace(/^data:application\/pdf;base64,/, '');
-              const buffer = Buffer.from(base64Data, 'base64');
-              const result = await extractTextFromPDF(buffer);
-              extractedText = result.text;
-              numPages = result.numPages;
-            } catch (error) {
-              console.error(`Error extracting text from PDF ${pdf.name}:`, error);
-              errorOccurred = true;
-            }
-
-            // Upload to Cloudinary
+            // Upload to Cloudinary for permanent storage
             const filename = generateCloudinaryFilename(
               sessionId,
               pdf.name ?? `document-${index}`,
             );
 
-            const secureUrl = await uploadToCloudinary(
+            const cloudinaryUrl = await uploadToCloudinary(
               pdf.base64,
               'chat-pdfs',
               filename,
               'raw',
             );
 
+            // Extract base64 data (remove data URL prefix if present)
+            const base64Data = pdf.base64.replace(/^data:application\/pdf;base64,/, '');
+
             return {
-              url: secureUrl,
-              name: pdf.name,
-              text: extractedText,
-              numPages,
-              errorOccurred,
+              cloudinaryUrl,
+              base64Data,
+              name: pdf.name || `document-${index}`,
             };
           }),
         );
 
-        // Build context from extracted text and URLs
+        // Store results
         pdfResults.forEach((result) => {
-          if (result.errorOccurred) {
-            pdfTexts.push(
-              `\n\n--- PDF Document: "${result.name}" ---\nURL: ${result.url}\n[Error: Could not extract text from this PDF]\n--- End of PDF ---\n`,
-            );
-          } else {
-            const chunks = chunkText(result.text, 12000);
-            const pdfSummary = chunks[0];
-
-            pdfTexts.push(
-              `\n\n--- PDF Document: "${result.name}" (${result.numPages} pages) ---\nURL: ${result.url}\n${pdfSummary}\n--- End of PDF ---\n`,
-            );
-          }
-
-          pdfUrls.push(result.url);
+          pdfUrls.push(result.cloudinaryUrl);
+          pdfData.push({
+            base64: result.base64Data,
+            name: result.name,
+          });
         });
-
-        pdfContext = pdfTexts.join('\n');
       } catch (error) {
         console.error('Error processing PDFs:', error);
         throw new Error('Failed to process PDFs');
@@ -235,13 +220,12 @@ export async function POST(request: NextRequest) {
     }
 
     let userMessageContent: string | (TextContent | ImageContent)[];
-    const messageText = pdfContext ? message + pdfContext : message;
-
+    
     if (hasImages) {
       userMessageContent = [
         {
           type: 'text' as const,
-          text: messageText,
+          text: message,
         },
         ...imageUrls.map((imageUrl: string) => ({
           type: 'image_url' as const,
@@ -252,7 +236,7 @@ export async function POST(request: NextRequest) {
         })),
       ];
     } else {
-      userMessageContent = messageText;
+      userMessageContent = message;
     }
 
     const userMessage = new HumanMessage({
@@ -260,39 +244,99 @@ export async function POST(request: NextRequest) {
     });
 
     await messageHistory.addMessage(userMessage);
-    const systemPrompt =
-      'You are a helpful AI assistant with vision and document analysis capabilities. You can analyze images, extract information from PDFs, and provide detailed insights. When answering questions about PDF documents, be specific and cite the relevant sections. Provide clear, concise, and accurate responses. Be friendly and professional.';
-
-    const messages = [
-      {
-        role: 'system',
-        content: systemPrompt,
-      },
-      ...previousMessages.map((msg: any) => {
-        const role = msg._getType() === 'human' ? 'user' : 'assistant';
-        let content = msg.content;
-
-        if (typeof content === 'object' && !Array.isArray(content)) {
-          content = String(content);
-        }
-
-        return { role, content };
-      }),
-      {
-        role: 'user',
-        content: userMessageContent,
-      },
-    ];
 
     let response;
-    try {
-      response = await model.invoke(messages);
-    } catch (invokeError) {
-      console.error('Error invoking OpenAI model:', invokeError);
-      console.error('Messages sent to model:', JSON.stringify(messages, null, 2));
-      throw new Error(
-        `OpenAI API error: ${invokeError instanceof Error ? invokeError.message : 'Unknown error'}`,
-      );
+    
+    // Use Gemini for PDF processing, OpenAI for everything else
+    if (hasPDFs) {
+      // Initialize Google GenAI client
+      const ai = new GoogleGenAI({ apiKey: process.env.GOOGLE_API_KEY! });
+
+      const systemPrompt =
+        'You are a helpful AI assistant with advanced document analysis capabilities. You can analyze PDF documents and provide detailed insights. When answering questions about PDF documents, be specific and cite the relevant sections. Provide clear, concise, and accurate responses. Be friendly and professional.';
+
+      // Build conversation history for context
+      let conversationContext = '';
+      if (previousMessages.length > 0) {
+        conversationContext = '\n\nPrevious conversation:\n';
+        previousMessages.forEach((msg: any) => {
+          const role = msg._getType() === 'human' ? 'User' : 'Assistant';
+          let content = msg.content;
+
+          // Extract text content only
+          if (Array.isArray(content)) {
+            const textParts = content.filter((part: any) => part.type === 'text');
+            content = textParts.map((part: any) => part.text).join('\n');
+          } else if (typeof content === 'object') {
+            content = String(content);
+          }
+
+          conversationContext += `${role}: ${content}\n`;
+        });
+      }
+
+      // Build contents array with text and inline PDF data
+      const contents = [
+        { text: `${systemPrompt}${conversationContext}\n\nUser question: ${message}\n\nPlease analyze the following PDF document(s) and answer the user's question:` },
+        ...pdfData.map((pdf) => ({
+          inlineData: {
+            mimeType: 'application/pdf',
+            data: pdf.base64,
+          },
+        })),
+      ];
+
+      try {
+        const geminiResponse = await ai.models.generateContent({
+          model: 'gemini-2.5-flash',
+          contents: contents,
+        });
+
+        // Create a compatible response object
+        response = {
+          content: geminiResponse.text,
+        };
+      } catch (invokeError) {
+        console.error('Error invoking Gemini model:', invokeError);
+        throw new Error(
+          `Gemini API error: ${invokeError instanceof Error ? invokeError.message : 'Unknown error'}`,
+        );
+      }
+    } else {
+      // Use OpenAI for regular chat and images
+      const systemPrompt =
+        'You are a helpful AI assistant with vision capabilities. You can analyze images and provide detailed insights. Provide clear, concise, and accurate responses. Be friendly and professional.';
+
+      const messages = [
+        {
+          role: 'system',
+          content: systemPrompt,
+        },
+        ...previousMessages.map((msg: any) => {
+          const role = msg._getType() === 'human' ? 'user' : 'assistant';
+          let content = msg.content;
+
+          if (typeof content === 'object' && !Array.isArray(content)) {
+            content = String(content);
+          }
+
+          return { role, content };
+        }),
+        {
+          role: 'user',
+          content: userMessageContent,
+        },
+      ];
+
+      try {
+        response = await model.invoke(messages);
+      } catch (invokeError) {
+        console.error('Error invoking OpenAI model:', invokeError);
+        console.error('Messages sent to model:', JSON.stringify(messages, null, 2));
+        throw new Error(
+          `OpenAI API error: ${invokeError instanceof Error ? invokeError.message : 'Unknown error'}`,
+        );
+      }
     }
 
     const assistantMessage =
